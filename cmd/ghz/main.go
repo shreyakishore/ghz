@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/alecthomas/kingpin"
+	"github.com/dustin/go-humanize"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -184,6 +185,18 @@ var (
 	si      = kingpin.Flag("stream-interval", "Interval for stream requests between message sends.").
 		Default("0").IsSetByUser(&isSISet).Duration()
 
+	isSCSet = false
+	scd     = kingpin.Flag("stream-call-duration", "Duration after which client will close the stream in each streaming call.").
+		Default("0").IsSetByUser(&isSCSet).Duration()
+
+	isSCCSet = false
+	scc      = kingpin.Flag("stream-call-count", "Count of messages sent, after which client will close the stream in each streaming call.").
+			Default("0").IsSetByUser(&isSCCSet).Uint()
+
+	isSDMSet = false
+	sdm      = kingpin.Flag("stream-dynamic-messages", "In streaming calls, regenerate and apply call template data on every message send.").
+			Default("false").IsSetByUser(&isSDMSet).Bool()
+
 	isRMDSet = false
 	rmd      = kingpin.Flag("reflect-metadata", "Reflect metadata as stringified JSON used only for reflection request.").
 			PlaceHolder(" ").IsSetByUser(&isRMDSet).String()
@@ -195,11 +208,15 @@ var (
 
 	isFormatSet = false
 	format      = kingpin.Flag("format", "Output format. One of: summary, csv, json, pretty, html, influx-summary, influx-details. Default is summary.").
-			Short('O').Default("summary").PlaceHolder(" ").IsSetByUser(&isFormatSet).Enum("summary", "csv", "json", "pretty", "html", "influx-summary", "influx-details")
+			Short('O').Default("summary").PlaceHolder(" ").IsSetByUser(&isFormatSet).Enum("summary", "csv", "json", "pretty", "html", "influx-summary", "influx-details", "prometheus")
 
 	isSkipFirstSet = false
 	skipFirst      = kingpin.Flag("skipFirst", "Skip the first X requests when doing the results tally.").
 			Default("0").IsSetByUser(&isSkipFirstSet).Uint()
+
+	isCESet     = false
+	countErrors = kingpin.Flag("count-errors", "Count erroneous (non-OK) resoponses in stats calculations.").
+			Default("false").IsSetByUser(&isCESet).Bool()
 
 	// Connection
 	isConnSet = false
@@ -232,12 +249,26 @@ var (
 	debug      = kingpin.Flag("debug", "The path to debug log file.").
 			PlaceHolder(" ").IsSetByUser(&isDebugSet).String()
 
-	isHostSet = false
-	host      = kingpin.Arg("host", "Host and port to test.").String()
-
 	isEnableCompressionSet = false
 	enableCompression      = kingpin.Flag("enable-compression", "Enable Gzip compression on requests.").
 				Short('e').Default("false").IsSetByUser(&isEnableCompressionSet).Bool()
+
+	isLBStrategySet = false
+	lbStrategy      = kingpin.Flag("lb-strategy", "Client load balancing strategy.").
+			PlaceHolder(" ").IsSetByUser(&isLBStrategySet).String()
+
+	// message size
+	isMaxRecvMsgSizeSet = false
+	maxRecvMsgSize      = kingpin.Flag("max-recv-message-size", "Maximum message size the client can receive.").
+				PlaceHolder(" ").IsSetByUser(&isMaxRecvMsgSizeSet).String()
+
+	isMaxSendMsgSizeSet = false
+	maxSendMsgSize      = kingpin.Flag("max-send-message-size", "Maximum message size the client can send.").
+				PlaceHolder(" ").IsSetByUser(&isMaxSendMsgSizeSet).String()
+
+	// host main argument
+	isHostSet = false
+	host      = kingpin.Arg("host", "Host and port to test.").String()
 )
 
 func main() {
@@ -282,6 +313,10 @@ func main() {
 		defer logger.Sync()
 
 		options = append(options, runner.WithLogger(logger))
+	}
+
+	if isLBStrategySet && cfg.Host != "" && !strings.HasPrefix(cfg.Host, "dns:///") {
+		logger.Warn("Load balancing strategy set without using DNS (dns:///) scheme. ", "Strategy: ", cfg.LBStrategy, " Host: ", cfg.Host)
 	}
 
 	if logger != nil {
@@ -373,14 +408,14 @@ func createConfigFromArgs(cfg *runner.Config) error {
 	*md = strings.TrimSpace(*md)
 	if *md != "" {
 		if err := json.Unmarshal([]byte(*md), &metadata); err != nil {
-			return fmt.Errorf("Error unmarshaling metadata '%v': %v", *md, err.Error())
+			return fmt.Errorf("error unmarshaling metadata '%v': %v", *md, err.Error())
 		}
 	}
 
 	var dataObj interface{}
 	if *data != "@" && strings.TrimSpace(*data) != "" {
 		if err := json.Unmarshal([]byte(*data), &dataObj); err != nil {
-			return fmt.Errorf("Error unmarshaling data '%v': %v", *data, err.Error())
+			return fmt.Errorf("error unmarshaling data '%v': %v", *data, err.Error())
 		}
 	}
 
@@ -388,7 +423,7 @@ func createConfigFromArgs(cfg *runner.Config) error {
 	*tags = strings.TrimSpace(*tags)
 	if *tags != "" {
 		if err := json.Unmarshal([]byte(*tags), &tagsMap); err != nil {
-			return fmt.Errorf("Error unmarshaling tags '%v': %v", *tags, err.Error())
+			return fmt.Errorf("error unmarshaling tags '%v': %v", *tags, err.Error())
 		}
 	}
 
@@ -396,7 +431,21 @@ func createConfigFromArgs(cfg *runner.Config) error {
 	*rmd = strings.TrimSpace(*rmd)
 	if *rmd != "" {
 		if err := json.Unmarshal([]byte(*rmd), &rmdMap); err != nil {
-			return fmt.Errorf("Error unmarshaling reflection metadata '%v': %v", *rmd, err.Error())
+			return fmt.Errorf("error unmarshaling reflection metadata '%v': %v", *rmd, err.Error())
+		}
+	}
+
+	if isMaxRecvMsgSizeSet {
+		_, err := humanize.ParseBytes(*maxRecvMsgSize)
+		if err != nil {
+			return errors.New("invalid max call recv message size: " + err.Error())
+		}
+	}
+
+	if isMaxSendMsgSizeSet {
+		_, err := humanize.ParseBytes(*maxSendMsgSize)
+		if err != nil {
+			return errors.New("invalid max call send message size: " + err.Error())
 		}
 	}
 
@@ -426,6 +475,9 @@ func createConfigFromArgs(cfg *runner.Config) error {
 	cfg.Metadata = metadata
 	cfg.MetadataPath = *mdPath
 	cfg.SI = runner.Duration(*si)
+	cfg.StreamCallDuration = runner.Duration(*scd)
+	cfg.StreamCallCount = *scc
+	cfg.StreamDynamicMessages = *sdm
 	cfg.Output = *output
 	cfg.Format = *format
 	cfg.ImportPaths = iPaths
@@ -451,6 +503,10 @@ func createConfigFromArgs(cfg *runner.Config) error {
 	cfg.CEnd = *cEnd
 	cfg.CStepDuration = runner.Duration(*cStepDuration)
 	cfg.CMaxDuration = runner.Duration(*cMaxDuration)
+	cfg.CountErrors = *countErrors
+	cfg.LBStrategy = *lbStrategy
+	cfg.MaxCallRecvMsgSize = *maxRecvMsgSize
+	cfg.MaxCallSendMsgSize = *maxSendMsgSize
 
 	return nil
 }
@@ -492,10 +548,6 @@ func mergeConfig(dest *runner.Config, src *runner.Config) error {
 		dest.SkipTLSVerify = src.SkipTLSVerify
 	}
 
-	if isSkipFirstSet {
-		dest.SkipFirst = src.SkipFirst
-	}
-
 	if isInsecSet {
 		dest.Insecure = src.Insecure
 	}
@@ -506,6 +558,14 @@ func mergeConfig(dest *runner.Config, src *runner.Config) error {
 
 	if isCNameSet {
 		dest.CName = src.CName
+	}
+
+	if isSkipFirstSet {
+		dest.SkipFirst = src.SkipFirst
+	}
+
+	if isCESet {
+		dest.CountErrors = src.CountErrors
 	}
 
 	// run
@@ -562,6 +622,18 @@ func mergeConfig(dest *runner.Config, src *runner.Config) error {
 		dest.SI = src.SI
 	}
 
+	if isSCSet {
+		dest.StreamCallDuration = src.StreamCallDuration
+	}
+
+	if isSCCSet {
+		dest.StreamCallCount = src.StreamCallCount
+	}
+
+	if isSDMSet {
+		dest.StreamDynamicMessages = src.StreamDynamicMessages
+	}
+
 	if isOutputSet {
 		dest.Output = src.Output
 	}
@@ -608,6 +680,10 @@ func mergeConfig(dest *runner.Config, src *runner.Config) error {
 
 	if isHostSet {
 		dest.Host = src.Host
+	}
+
+	if isLBStrategySet {
+		dest.LBStrategy = src.LBStrategy
 	}
 
 	// load
@@ -672,6 +748,16 @@ func mergeConfig(dest *runner.Config, src *runner.Config) error {
 
 	if isCMaxDurSet {
 		dest.CMaxDuration = src.CMaxDuration
+	}
+
+	// message size
+
+	if isMaxRecvMsgSizeSet {
+		dest.MaxCallRecvMsgSize = src.MaxCallRecvMsgSize
+	}
+
+	if isMaxSendMsgSizeSet {
+		dest.MaxCallSendMsgSize = src.MaxCallSendMsgSize
 	}
 
 	return nil

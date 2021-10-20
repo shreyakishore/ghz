@@ -123,7 +123,7 @@ class ReportList extends Component {
     const nSelected = Object.keys(this.state.selected).length
 
     let selectedColumns = this.state.selectedColumnsKeys.map(
-      key => this.state.columns.find(col => col.key == key)
+      key => this.state.columns.find(col => col.key === key)
     )
 
     return (
@@ -213,7 +213,7 @@ class ReportList extends Component {
             </Table.TextHeaderCell>
             {
               selectedColumns.map(col =>
-                <Table.TextHeaderCell textProps={{ size: 400 }}>{col.title}</Table.TextHeaderCell>
+                <Table.TextHeaderCell key={col.title} textProps={{ size: 400 }}>{col.title}</Table.TextHeaderCell>
               )
             }
             <Table.TextHeaderCell maxWidth={80} textProps={{ size: 400 }}>
@@ -245,7 +245,7 @@ class ReportList extends Component {
                   </RouterLink>
                 </Table.TextCell>
                 {selectedColumns.map(col => 
-                <Table.TextCell key={col.key} {...col.props}>
+                <Table.TextCell key={col.key} textProps={{ size: 400 }} {...col.props}>
                   {col.formatter ? col.formatter(p[col.key]) : p[col.key]}
                 </Table.TextCell>
                 )}

@@ -2,11 +2,9 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,10 +17,14 @@ import (
 
 	"go.uber.org/multierr"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 
 	reflectpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+
+	// To register the xds resolvers and balancers.
+	_ "google.golang.org/grpc/xds"
 )
 
 // Max size of the buffer of result channel.
@@ -51,7 +53,8 @@ type Requester struct {
 	stopCh  chan bool
 	start   time.Time
 
-	arrayJSONData []string
+	dataProvider     DataProviderFunc
+	metadataProvider MetadataProviderFunc
 
 	lock       sync.Mutex
 	stopReason StopReason
@@ -78,6 +81,8 @@ func NewRequester(c *RunConfig) (*Requester, error) {
 		mtd, err = protodesc.GetMethodDescFromProto(c.call, c.proto, c.importPaths)
 	} else if c.protoset != "" {
 		mtd, err = protodesc.GetMethodDescFromProtoSet(c.call, c.protoset)
+	} else if c.protosetBinary != nil {
+		mtd, err = protodesc.GetMethodDescFromProtoSetBinary(c.call, c.protosetBinary)
 	} else {
 		// use reflection to get method descriptor
 		var cc *grpc.ClientConn
@@ -122,25 +127,24 @@ func NewRequester(c *RunConfig) (*Requester, error) {
 	// fill in the rest
 	reqr.mtd = mtd
 
-	// fill in JSON string array data for optimization for non client-streaming
-	reqr.arrayJSONData = nil
-	if !c.binary && !reqr.mtd.IsClientStreaming() {
-		if strings.IndexRune(string(c.data), '[') == 0 { // it's an array
-			var dat []map[string]interface{}
-			if err := json.Unmarshal(c.data, &dat); err != nil {
-				return nil, err
-			}
-
-			reqr.arrayJSONData = make([]string, len(dat))
-			for i, d := range dat {
-				var strd []byte
-				if strd, err = json.Marshal(d); err != nil {
-					return nil, err
-				}
-
-				reqr.arrayJSONData[i] = string(strd)
-			}
+	if c.dataProviderFunc != nil {
+		reqr.dataProvider = c.dataProviderFunc
+	} else {
+		defaultDataProvider, err := newDataProvider(reqr.mtd, c.binary, c.dataFunc, c.data, c.funcs)
+		if err != nil {
+			return nil, err
 		}
+		reqr.dataProvider = defaultDataProvider.getDataForCall
+	}
+
+	if c.mdProviderFunc != nil {
+		reqr.metadataProvider = c.mdProviderFunc
+	} else {
+		defaultMDProvider, err := newMetadataProvider(reqr.mtd, c.metadata, c.funcs)
+		if err != nil {
+			return nil, err
+		}
+		reqr.metadataProvider = defaultMDProvider.getMetadataForCall
 	}
 
 	return reqr, nil
@@ -182,6 +186,7 @@ func (b *Requester) Run() (*Report, error) {
 	err = b.runWorkers(wt, p)
 
 	report := b.Finish()
+
 	b.closeClientConns()
 
 	return report, err
@@ -270,7 +275,14 @@ func (b *Requester) closeClientConns() {
 	}
 
 	for _, cc := range b.conns {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(time.Second*10))
+		defer cancel()
+
+		shutdownCh := connectionOnState(ctx, cc, connectivity.Shutdown)
+
 		_ = cc.Close()
+
+		<-shutdownCh
 	}
 
 	b.conns = nil
@@ -287,6 +299,18 @@ func (b *Requester) newClientConn(withStatsHandler bool) (*grpc.ClientConn, erro
 
 	if b.config.authority != "" {
 		opts = append(opts, grpc.WithAuthority(b.config.authority))
+	}
+
+	if len(b.config.defaultCallOptions) > 0 {
+		opts = append(opts, grpc.WithDefaultCallOptions(b.config.defaultCallOptions...))
+	} else {
+		// increase max receive and send message sizes
+		opts = append(opts,
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(math.MaxInt32),
+				grpc.MaxCallSendMsgSize(math.MaxInt32),
+			))
+
 	}
 
 	ctx := context.Background()
@@ -318,13 +342,6 @@ func (b *Requester) newClientConn(withStatsHandler bool) (*grpc.ClientConn, erro
 		b.config.log.Debugw("Creating client connection", "options", opts)
 	}
 
-	// increase max receive and send message sizes
-	opts = append(opts,
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(math.MaxInt32),
-			grpc.MaxCallSendMsgSize(math.MaxInt32),
-		))
-
 	if b.config.lbStrategy != "" {
 		opts = append(opts, grpc.WithBalancerName(b.config.lbStrategy))
 	}
@@ -346,10 +363,12 @@ func (b *Requester) runWorkers(wt load.WorkerTicker, p load.Pacer) error {
 
 	errC := make(chan error, b.config.c)
 	done := make(chan struct{})
+	workerTickerDone := make(chan struct{})
 	ticks := make(chan TickValue)
 	counter := Counter{}
 
 	go func() {
+		defer close(workerTickerDone)
 		n := 0
 		wc := 0
 		for tv := range wct {
@@ -366,19 +385,21 @@ func (b *Requester) runWorkers(wt load.WorkerTicker, p load.Pacer) error {
 					}
 
 					if b.config.hasLog {
-						b.config.log.Debugw("Creating worker with ID: "+wID,
-							"workerID", wID, "requests per worker")
+						b.config.log.Debugw("Creating worker with ID: "+wID, "workerID", wID)
 					}
 
 					w := Worker{
-						ticks:         ticks,
-						active:        true,
-						stub:          b.stubs[n],
-						mtd:           b.mtd,
-						config:        b.config,
-						stopCh:        make(chan bool),
-						workerID:      wID,
-						arrayJSONData: b.arrayJSONData,
+						ticks:            ticks,
+						active:           true,
+						stub:             b.stubs[n],
+						mtd:              b.mtd,
+						config:           b.config,
+						stopCh:           make(chan bool),
+						workerID:         wID,
+						dataProvider:     b.dataProvider,
+						metadataProvider: b.metadataProvider,
+						streamRecv:       b.config.recvMsgFunc,
+						msgProvider:      b.config.dataStreamFunc,
 					}
 
 					wc++ // increment worker id
@@ -415,13 +436,14 @@ func (b *Requester) runWorkers(wt load.WorkerTicker, p load.Pacer) error {
 				}
 				wm.Unlock()
 			}
+			if tv.Done {
+				return
+			}
 		}
 	}()
 
 	go func() {
 		defer close(ticks)
-		defer wt.Finish()
-
 		defer func() {
 			wm.Lock()
 			nw := len(b.workers)
@@ -429,6 +451,11 @@ func (b *Requester) runWorkers(wt load.WorkerTicker, p load.Pacer) error {
 				b.workers[i].Stop()
 			}
 			wm.Unlock()
+		}()
+
+		defer func() {
+			wt.Finish()
+			<-workerTickerDone
 		}()
 
 		began := time.Now()
@@ -464,7 +491,10 @@ func (b *Requester) runWorkers(wt load.WorkerTicker, p load.Pacer) error {
 	<-done
 
 	var err error
-	for i := 0; i < len(b.workers); i++ {
+	wm.Lock()
+	nw := len(b.workers)
+	wm.Unlock()
+	for i := 0; i < nw; i++ {
 		err = multierr.Append(err, <-errC)
 	}
 
@@ -538,4 +568,43 @@ func createPacer(config *RunConfig) load.Pacer {
 	}
 
 	return p
+}
+
+func checkState(conn *grpc.ClientConn, states ...connectivity.State) bool {
+	currentState := conn.GetState()
+	for _, s := range states {
+		if currentState == s {
+			return true
+		}
+	}
+
+	return false
+}
+
+func connectionOnState(ctx context.Context, conn *grpc.ClientConn, states ...connectivity.State) <-chan bool {
+
+	stateCh := make(chan bool)
+
+	go func() {
+		defer close(stateCh)
+		if checkState(conn, states...) {
+			stateCh <- true
+			return
+		}
+
+		for {
+			change := conn.WaitForStateChange(ctx, conn.GetState())
+			if !change {
+				stateCh <- checkState(conn, states...)
+				return
+			}
+
+			if checkState(conn, states...) {
+				stateCh <- true
+				return
+			}
+		}
+	}()
+
+	return stateCh
 }

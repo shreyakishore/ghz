@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"text/template"
@@ -11,6 +12,7 @@ import (
 )
 
 func TestCallData_New(t *testing.T) {
+
 	md, err := protodesc.GetMethodDescFromProto("helloworld.Greeter/SayHello", "../testdata/greeter.proto", []string{})
 	assert.NoError(t, err)
 	assert.NotNil(t, md)
@@ -40,10 +42,6 @@ func TestCallData_ExecuteData(t *testing.T) {
 	md, err := protodesc.GetMethodDescFromProto("helloworld.Greeter/SayHello", "../testdata/greeter.proto", []string{})
 	assert.NoError(t, err)
 	assert.NotNil(t, md)
-
-	ctd := newCallData(md, nil, "worker_id_123", 200)
-
-	assert.NotNil(t, ctd)
 
 	var tests = []struct {
 		name        string
@@ -75,7 +73,10 @@ func TestCallData_ExecuteData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, err := ctd.executeData(tt.in)
+			ctd := newCallData(md, nil, "worker_id_123", 200)
+			assert.NotNil(t, ctd)
+
+			r, err := ctd.ExecuteData(tt.in)
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -91,10 +92,6 @@ func TestCallData_ExecuteMetadata(t *testing.T) {
 	md, err := protodesc.GetMethodDescFromProto("helloworld.Greeter/SayHello", "../testdata/greeter.proto", []string{})
 	assert.NoError(t, err)
 	assert.NotNil(t, md)
-
-	ctd := newCallData(md, nil, "worker_id_123", 200)
-
-	assert.NotNil(t, ctd)
 
 	var tests = []struct {
 		name        string
@@ -117,10 +114,19 @@ func TestCallData_ExecuteMetadata(t *testing.T) {
 			map[string]string{"trace_id": "asdf {{.Something}} {{.MethodName}} bob"},
 			false,
 		},
+		{"with binary data",
+			`{"data-bin":"YmFzZTY0"}`,
+			map[string]string{"data-bin": "base64"},
+			false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+
+			ctd := newCallData(md, nil, "worker_id_123", 200)
+			assert.NotNil(t, ctd)
+
 			r, err := ctd.executeMetadata(tt.in)
 			if tt.expectError {
 				assert.Error(t, err)
@@ -138,14 +144,13 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, md)
 
-	ctd := newCallData(md, nil, "worker_id_123", 200)
-
-	assert.NotNil(t, ctd)
-
 	t.Run("newUUID", func(t *testing.T) {
 
+		ctd := newCallData(md, nil, "worker_id_123", 200)
+		assert.NotNil(t, ctd)
+
 		// no template
-		r, err := ctd.executeData(`{"trace_id":"asdf"}`)
+		r, err := ctd.ExecuteData(`{"trace_id":"asdf"}`)
 		assert.NoError(t, err)
 		assert.Equal(t, `{"trace_id":"asdf"}`, string(r))
 
@@ -154,7 +159,7 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 		assert.Equal(t, map[string]string{"trace_id": "asdf"}, rm)
 
 		// new uuid
-		r, err = ctd.executeData(`{"trace_id":"{{newUUID}}"}`)
+		r, err = ctd.ExecuteData(`{"trace_id":"{{newUUID}}"}`)
 		assert.NoError(t, err)
 		rs := strings.Replace(string(r), `{"trace_id":"`, "", -1)
 		rs = strings.Replace(rs, `"}`, "", -1)
@@ -189,9 +194,11 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 	})
 
 	t.Run("randomString", func(t *testing.T) {
+		ctd := newCallData(md, nil, "worker_id_123", 200)
+		assert.NotNil(t, ctd)
 
 		// no template
-		r, err := ctd.executeData(`{"trace_id":"asdf"}`)
+		r, err := ctd.ExecuteData(`{"trace_id":"asdf"}`)
 		assert.NoError(t, err)
 		assert.Equal(t, `{"trace_id":"asdf"}`, string(r))
 
@@ -200,7 +207,7 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 		assert.Equal(t, map[string]string{"trace_id": "asdf"}, rm)
 
 		// default length when 0
-		r, err = ctd.executeData(`{"trace_id":"{{randomString 0}}"}`)
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomString 0}}"}`)
 		assert.NoError(t, err)
 		rs := strings.Replace(string(r), `{"trace_id":"`, "", -1)
 		rs = strings.Replace(rs, `"}`, "", -1)
@@ -209,7 +216,7 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 		assert.True(t, len(rs) <= 16)
 
 		// default length when -1
-		r, err = ctd.executeData(`{"trace_id":"{{randomString -1}}"}`)
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomString -1}}"}`)
 		assert.NoError(t, err)
 		rs2 := strings.Replace(string(r), `{"trace_id":"`, "", -1)
 		rs2 = strings.Replace(rs2, `"}`, "", -1)
@@ -219,7 +226,7 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 		assert.True(t, len(rs2) <= 16)
 
 		// specific length
-		r, err = ctd.executeData(`{"trace_id":"{{randomString 10}}"}`)
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomString 10}}"}`)
 		assert.NoError(t, err)
 		rs = strings.Replace(string(r), `{"trace_id":"`, "", -1)
 		rs = strings.Replace(rs, `"}`, "", -1)
@@ -248,7 +255,49 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 		assert.NotEqual(t, rm["trace_id"], rm["span_id"])
 	})
 
+	t.Run("randomInt", func(t *testing.T) {
+		ctd := newCallData(md, nil, "worker_id_123", 200)
+		assert.NotNil(t, ctd)
+
+		// no template
+		r, err := ctd.ExecuteData(`{"trace_id":"asdf"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"trace_id":"asdf"}`, string(r))
+
+		rm, err := ctd.executeMetadata(`{"trace_id":"asdf"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]string{"trace_id": "asdf"}, rm)
+
+		// 0 when 0
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomInt 0 0}}"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"trace_id":"0"}`, string(r))
+
+		// 0 when min -1
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomInt -1 1}}"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"trace_id":"0"}`, string(r))
+
+		// 0 when max -1
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomInt 0 -1}}"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"trace_id":"0"}`, string(r))
+
+		// specific range
+		r, err = ctd.ExecuteData(`{"trace_id":"{{randomInt 4 10}}"}`)
+		assert.NoError(t, err)
+		rs := strings.Replace(string(r), `{"trace_id":"`, "", -1)
+		rs = strings.Replace(rs, `"}`, "", -1)
+		n, err := strconv.Atoi(rs)
+		assert.NoError(t, err)
+		assert.True(t, 4 <= n && n < 10)
+	})
+
 	t.Run("custom functions", func(t *testing.T) {
+
+		ctd := newCallData(md, nil, "worker_id_123", 200)
+		assert.NotNil(t, ctd)
+
 		ctd = newCallData(md, template.FuncMap{
 			"getSKU": func() string {
 				return "custom-sku"
@@ -258,7 +307,7 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 			},
 		}, "worker_id_123", 200)
 
-		r, err := ctd.executeData(`{"trace_id":"{{newUUID}}", "span_id":"{{getSKU}}"}`)
+		r, err := ctd.ExecuteData(`{"trace_id":"{{newUUID}}", "span_id":"{{getSKU}}"}`)
 		assert.NoError(t, err)
 		assert.Equal(t, `{"trace_id":"custom-uuid", "span_id":"custom-sku"}`, string(r))
 
@@ -267,5 +316,19 @@ func TestCallTemplateData_ExecuteFuncs(t *testing.T) {
 		assert.Len(t, rm["span_id"], 12)
 		assert.Equal(t, "custom-uuid", rm["trace_id"])
 		assert.Equal(t, "custom-sku", rm["sku"])
+	})
+
+	t.Run("sprig functions", func(t *testing.T) {
+
+		ctd := newCallData(md, nil, "worker_id_123", 200)
+		assert.NotNil(t, ctd)
+
+		r, err := ctd.ExecuteData(`{"trace_id":"{{add 1 2}}"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"trace_id":"3"}`, string(r))
+
+		r, err = ctd.ExecuteData(`{"trace_id":"{{"abc" | upper | repeat 3 }}"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, `{"trace_id":"ABCABCABC"}`, string(r))
 	})
 }
