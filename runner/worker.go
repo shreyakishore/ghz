@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	"github.com/golang/protobuf/jsonpb"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
@@ -16,7 +17,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
-	"github.com/golang/protobuf/jsonpb"
 )
 
 // TickValue is the tick value
@@ -167,7 +167,6 @@ func (w *Worker) makeRequest(tv TickValue) error {
 	return err
 }
 
-
 // ProtobufToJSON converts protocol buffer message to JSON string
 /*
 type Marshaler struct {
@@ -216,7 +215,7 @@ func (w *Worker) makeUnaryRequest(ctx *context.Context, reqMD *metadata.MD, inpu
 		w.config.log.Debugw("Received response", "workerID", w.workerID, "call type", "unary",
 			"call", w.mtd.GetFullyQualifiedName(),
 			"input", input, "metadata", reqMD,
-			"response", res, "response1", data, "response2", out, "error", resErr)
+			"response", res, "json_response", data, "response2", out, "error", resErr)
 	}
 
 	return resErr
