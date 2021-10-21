@@ -215,7 +215,11 @@ func (w *Worker) makeUnaryRequest(ctx *context.Context, reqMD *metadata.MD, inpu
 		w.config.log.Debugw("Received response", "workerID", w.workerID, "call type", "unary",
 			"call", w.mtd.GetFullyQualifiedName(),
 			"input", input, "metadata", reqMD,
-			"response", res, "json_response", data, "response2", out, "error", resErr)
+			"response", res, "response2", out, "error", resErr)
+		w.config.log.Debugw("json_response", "workerID", w.workerID, "call type", "unary",
+			"call", w.mtd.GetFullyQualifiedName(),
+			"input", input, "metadata", reqMD,
+			"response", res, "myresponse", data, "response2", out, "error", resErr)
 	}
 
 	return resErr
